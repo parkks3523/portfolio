@@ -70,24 +70,12 @@
             touch-action: pan-x pan-y pinch-zoom;
         }
 
-        .page-wrapper {
-            position: relative;
-            background: white;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
         .page-canvas {
             display: block;
             max-width: 100%;
             height: auto;
-        }
-
-        .page-placeholder {
-            color: #aaa;
-            font-size: 14px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            background: white;
         }
 
         #toolbar {
@@ -216,9 +204,7 @@
         let pdfDoc = null;
         let currentPage = 1;
         let scale = 1.0;
-        let pageWrappers = [];
-        let pageRenderState = [];
-        let pageObserver = null;
+        let pageCanvases = [];
         let renderToken = 0;
 
         function getDisplayScale(viewport) {
@@ -227,97 +213,42 @@
             return baseScale * scale;
         }
 
-        async function createPlaceholders() {
-            viewer.innerHTML = '';
-            pageWrappers = [];
-            pageRenderState = [];
+        async function renderPage(pageNum, token) {
+            const page = await pdfDoc.getPage(pageNum);
+            if (token !== renderToken) return null;
 
-            const firstPage = await pdfDoc.getPage(1);
-            const baseViewport = firstPage.getViewport({ scale: 1 });
+            const baseViewport = page.getViewport({ scale: 1 });
             const displayScale = getDisplayScale(baseViewport);
+            const devicePixelRatio = window.devicePixelRatio || 1;
+            const renderViewport = page.getViewport({ scale: displayScale * devicePixelRatio });
 
-            for (let i = 1; i <= pdfDoc.numPages; i++) {
-                const wrapper = document.createElement('div');
-                wrapper.className = 'page-wrapper';
-                wrapper.dataset.pageNum = i;
-                wrapper.style.width = (baseViewport.width * displayScale) + 'px';
-                wrapper.style.height = (baseViewport.height * displayScale) + 'px';
+            const canvas = document.createElement('canvas');
+            canvas.className = 'page-canvas';
+            canvas.width = renderViewport.width;
+            canvas.height = renderViewport.height;
+            canvas.style.width = (renderViewport.width / devicePixelRatio) + 'px';
+            canvas.style.height = (renderViewport.height / devicePixelRatio) + 'px';
 
-                const placeholder = document.createElement('div');
-                placeholder.className = 'page-placeholder';
-                placeholder.textContent = i;
-                wrapper.appendChild(placeholder);
+            const ctx = canvas.getContext('2d');
+            await page.render({ canvasContext: ctx, viewport: renderViewport }).promise;
 
-                viewer.appendChild(wrapper);
-                pageWrappers.push(wrapper);
-                pageRenderState.push('pending');
-            }
+            return canvas;
         }
 
-        async function renderPageInto(pageNum, token) {
-            if (pageRenderState[pageNum - 1] === 'rendered' || pageRenderState[pageNum - 1] === 'rendering') return;
-            pageRenderState[pageNum - 1] = 'rendering';
-
-            try {
-                const page = await pdfDoc.getPage(pageNum);
-                if (token !== renderToken) return;
-
-                const baseViewport = page.getViewport({ scale: 1 });
-                const displayScale = getDisplayScale(baseViewport);
-                const devicePixelRatio = window.devicePixelRatio || 1;
-                const renderViewport = page.getViewport({ scale: displayScale * devicePixelRatio });
-
-                const wrapper = pageWrappers[pageNum - 1];
-                wrapper.style.width = (baseViewport.width * displayScale) + 'px';
-                wrapper.style.height = (baseViewport.height * displayScale) + 'px';
-
-                const canvas = document.createElement('canvas');
-                canvas.className = 'page-canvas';
-                canvas.width = renderViewport.width;
-                canvas.height = renderViewport.height;
-                canvas.style.width = (renderViewport.width / devicePixelRatio) + 'px';
-                canvas.style.height = (renderViewport.height / devicePixelRatio) + 'px';
-
-                const ctx = canvas.getContext('2d');
-                await page.render({ canvasContext: ctx, viewport: renderViewport }).promise;
-
-                if (token !== renderToken) return;
-
-                wrapper.innerHTML = '';
-                wrapper.appendChild(canvas);
-                pageRenderState[pageNum - 1] = 'rendered';
-            } catch (err) {
-                pageRenderState[pageNum - 1] = 'pending';
-                console.error(`Page ${pageNum} render failed:`, err);
-            }
-        }
-
-        function setupObserver(token) {
-            if (pageObserver) pageObserver.disconnect();
-
-            pageObserver = new IntersectionObserver((entries) => {
-                entries.forEach((entry) => {
-                    if (entry.isIntersecting) {
-                        const pageNum = parseInt(entry.target.dataset.pageNum, 10);
-                        renderPageInto(pageNum, token);
-                    }
-                });
-            }, {
-                root: viewer,
-                rootMargin: '200px 0px',
-                threshold: 0.01,
-            });
-
-            pageWrappers.forEach((w) => pageObserver.observe(w));
-        }
-
-        async function rerenderAll() {
+        async function renderAllPages() {
             renderToken++;
             const token = renderToken;
-            await createPlaceholders();
-            setupObserver(token);
-            await renderPageInto(currentPage, token);
-            scrollToPage(currentPage, 'auto');
+            viewer.innerHTML = '';
+            pageCanvases = [];
+
+            for (let i = 1; i <= pdfDoc.numPages; i++) {
+                const canvas = await renderPage(i, token);
+                if (token !== renderToken) return;
+                if (canvas) {
+                    viewer.appendChild(canvas);
+                    pageCanvases.push(canvas);
+                }
+            }
         }
 
         function updatePageInfo() {
@@ -327,9 +258,9 @@
         }
 
         function scrollToPage(pageNum, behavior = 'smooth') {
-            const wrapper = pageWrappers[pageNum - 1];
-            if (wrapper) {
-                wrapper.scrollIntoView({ behavior, block: 'start' });
+            const canvas = pageCanvases[pageNum - 1];
+            if (canvas) {
+                canvas.scrollIntoView({ behavior, block: 'start' });
             }
         }
 
@@ -353,7 +284,10 @@
         function applyZoom(newScale) {
             scale = Math.max(0.5, Math.min(3, newScale));
             clearTimeout(zoomDebounce);
-            zoomDebounce = setTimeout(() => rerenderAll(), 100);
+            zoomDebounce = setTimeout(async () => {
+                await renderAllPages();
+                scrollToPage(currentPage, 'auto');
+            }, 100);
         }
 
         zoomInBtn.addEventListener('click', () => applyZoom(scale + 0.25));
@@ -362,10 +296,10 @@
         viewer.addEventListener('scroll', () => {
             const scrollTop = viewer.scrollTop;
             const viewerHeight = viewer.clientHeight;
-            for (let i = 0; i < pageWrappers.length; i++) {
-                const wrapper = pageWrappers[i];
-                const top = wrapper.offsetTop - viewer.offsetTop;
-                const bottom = top + wrapper.offsetHeight;
+            for (let i = 0; i < pageCanvases.length; i++) {
+                const canvas = pageCanvases[i];
+                const top = canvas.offsetTop - viewer.offsetTop;
+                const bottom = top + canvas.offsetHeight;
                 if (top <= scrollTop + viewerHeight / 2 && bottom >= scrollTop + viewerHeight / 2) {
                     if (currentPage !== i + 1) {
                         currentPage = i + 1;
@@ -426,26 +360,20 @@
         let resizeTimeout;
         window.addEventListener('resize', () => {
             clearTimeout(resizeTimeout);
-            resizeTimeout = setTimeout(() => {
-                if (pdfDoc) rerenderAll();
+            resizeTimeout = setTimeout(async () => {
+                if (pdfDoc) {
+                    await renderAllPages();
+                    scrollToPage(currentPage, 'auto');
+                }
             }, 300);
         });
 
         try {
             pdfDoc = await pdfjsLib.getDocument(CONFIG.PDF_FILE).promise;
-            renderToken++;
-            const token = renderToken;
-
-            await createPlaceholders();
-            await renderPageInto(1, token);
-
+            await renderAllPages();
             loading.style.display = 'none';
             toolbar.style.display = 'flex';
             updatePageInfo();
-
-            setupObserver(token);
-
-            requestIdleCallback ? requestIdleCallback(() => prefetchRemaining(token)) : setTimeout(() => prefetchRemaining(token), 100);
         } catch (err) {
             const isNotFound = err.name === 'MissingPDFException' || /404|not found/i.test(err.message);
             loading.innerHTML = isNotFound
@@ -460,15 +388,6 @@
                    </div>`
                 : `<div style="color: #ff6b6b;">PDF를 불러올 수 없습니다.<br>${err.message}</div>`;
             console.error(err);
-        }
-
-        async function prefetchRemaining(token) {
-            for (let i = 2; i <= pdfDoc.numPages; i++) {
-                if (token !== renderToken) return;
-                if (pageRenderState[i - 1] === 'rendered') continue;
-                await renderPageInto(i, token);
-                await new Promise((r) => setTimeout(r, 50));
-            }
         }
     </script>
 </body>
