@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes">
     <title>Kyungsub Park</title>
     <style>
         * {
@@ -14,53 +14,278 @@
         html, body {
             width: 100%;
             height: 100%;
+            background-color: #525659;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Apple SD Gothic Neo', sans-serif;
             overflow: hidden;
         }
 
-        body {
-            display: flex;
-            flex-direction: column;
-            background-color: #525659;
-        }
-
-        .pdf-container {
-            position: relative;
+        #viewer {
             width: 100%;
             height: 100vh;
-            overflow: hidden;
+            overflow: auto;
+            -webkit-overflow-scrolling: touch;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px 0;
+            gap: 16px;
         }
 
-        iframe {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
+        .page-canvas {
+            display: block;
+            max-width: 100%;
+            height: auto;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            background: white;
+        }
+
+        #toolbar {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(40, 40, 40, 0.9);
+            color: white;
+            padding: 10px 16px;
+            border-radius: 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 14px;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+            z-index: 10;
+            user-select: none;
+        }
+
+        #toolbar button {
+            background: rgba(255, 255, 255, 0.15);
+            color: white;
             border: none;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+        }
+
+        #toolbar button:hover {
+            background: rgba(255, 255, 255, 0.25);
+        }
+
+        #toolbar button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        #pageInfo {
+            min-width: 60px;
+            text-align: center;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 16px;
+            text-align: center;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255, 255, 255, 0.2);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 12px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
         }
 
         @media screen and (max-width: 768px) {
-            .pdf-container {
-                overflow: auto;
-                -webkit-overflow-scrolling: touch;
-            }
-        }
-
-        @media screen and (max-width: 480px) {
-            html, body {
-                overflow: auto;
+            #viewer {
+                padding: 10px 0;
+                gap: 10px;
             }
 
-            .pdf-container {
-                height: auto;
-                min-height: 100vh;
+            #toolbar {
+                bottom: 12px;
+                padding: 8px 12px;
+                font-size: 13px;
+            }
+
+            #toolbar button {
+                width: 36px;
+                height: 36px;
             }
         }
     </style>
 </head>
 <body>
-    <div class="pdf-container">
-        <iframe src="portfolio_fin_30.pdf#toolbar=1&navpanes=0&scrollbar=1&view=FitH"></iframe>
+    <div id="viewer"></div>
+
+    <div id="loading">
+        <div class="spinner"></div>
+        <div>PDF 로딩중...</div>
     </div>
+
+    <div id="toolbar" style="display: none;">
+        <button id="prevBtn" aria-label="이전 페이지">‹</button>
+        <span id="pageInfo">1 / 1</span>
+        <button id="nextBtn" aria-label="다음 페이지">›</button>
+        <button id="zoomOutBtn" aria-label="축소">−</button>
+        <button id="zoomInBtn" aria-label="확대">+</button>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs" type="module"></script>
+    <script type="module">
+        import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs';
+
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs';
+
+        const PDF_URL = 'portfolio_fin_30.pdf';
+        const viewer = document.getElementById('viewer');
+        const loading = document.getElementById('loading');
+        const toolbar = document.getElementById('toolbar');
+        const pageInfo = document.getElementById('pageInfo');
+        const prevBtn = document.getElementById('prevBtn');
+        const nextBtn = document.getElementById('nextBtn');
+        const zoomInBtn = document.getElementById('zoomInBtn');
+        const zoomOutBtn = document.getElementById('zoomOutBtn');
+
+        let pdfDoc = null;
+        let currentPage = 1;
+        let scale = 1.0;
+        let pageCanvases = [];
+
+        async function renderPage(pageNum) {
+            const page = await pdfDoc.getPage(pageNum);
+            const containerWidth = viewer.clientWidth - 40;
+            const viewport = page.getViewport({ scale: 1 });
+            const baseScale = Math.min(containerWidth / viewport.width, 1.5);
+            const finalScale = baseScale * scale;
+
+            const devicePixelRatio = window.devicePixelRatio || 1;
+            const scaledViewport = page.getViewport({ scale: finalScale * devicePixelRatio });
+
+            const canvas = document.createElement('canvas');
+            canvas.className = 'page-canvas';
+            canvas.width = scaledViewport.width;
+            canvas.height = scaledViewport.height;
+            canvas.style.width = (scaledViewport.width / devicePixelRatio) + 'px';
+            canvas.style.height = (scaledViewport.height / devicePixelRatio) + 'px';
+            canvas.dataset.pageNum = pageNum;
+
+            const ctx = canvas.getContext('2d');
+            await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise;
+
+            return canvas;
+        }
+
+        async function renderAllPages() {
+            viewer.innerHTML = '';
+            pageCanvases = [];
+            for (let i = 1; i <= pdfDoc.numPages; i++) {
+                const canvas = await renderPage(i);
+                viewer.appendChild(canvas);
+                pageCanvases.push(canvas);
+            }
+        }
+
+        function updatePageInfo() {
+            pageInfo.textContent = `${currentPage} / ${pdfDoc.numPages}`;
+            prevBtn.disabled = currentPage <= 1;
+            nextBtn.disabled = currentPage >= pdfDoc.numPages;
+        }
+
+        function scrollToPage(pageNum) {
+            const canvas = pageCanvases[pageNum - 1];
+            if (canvas) {
+                canvas.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        }
+
+        prevBtn.addEventListener('click', () => {
+            if (currentPage > 1) {
+                currentPage--;
+                scrollToPage(currentPage);
+                updatePageInfo();
+            }
+        });
+
+        nextBtn.addEventListener('click', () => {
+            if (currentPage < pdfDoc.numPages) {
+                currentPage++;
+                scrollToPage(currentPage);
+                updatePageInfo();
+            }
+        });
+
+        zoomInBtn.addEventListener('click', async () => {
+            scale = Math.min(scale + 0.25, 3);
+            await renderAllPages();
+            scrollToPage(currentPage);
+        });
+
+        zoomOutBtn.addEventListener('click', async () => {
+            scale = Math.max(scale - 0.25, 0.5);
+            await renderAllPages();
+            scrollToPage(currentPage);
+        });
+
+        viewer.addEventListener('scroll', () => {
+            const scrollTop = viewer.scrollTop;
+            const viewerHeight = viewer.clientHeight;
+            for (let i = 0; i < pageCanvases.length; i++) {
+                const canvas = pageCanvases[i];
+                const top = canvas.offsetTop - viewer.offsetTop;
+                const bottom = top + canvas.offsetHeight;
+                if (top <= scrollTop + viewerHeight / 2 && bottom >= scrollTop + viewerHeight / 2) {
+                    if (currentPage !== i + 1) {
+                        currentPage = i + 1;
+                        updatePageInfo();
+                    }
+                    break;
+                }
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowLeft' || e.key === 'PageUp') prevBtn.click();
+            if (e.key === 'ArrowRight' || e.key === 'PageDown') nextBtn.click();
+        });
+
+        let resizeTimeout;
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(async () => {
+                if (pdfDoc) {
+                    await renderAllPages();
+                    scrollToPage(currentPage);
+                }
+            }, 300);
+        });
+
+        try {
+            pdfDoc = await pdfjsLib.getDocument(PDF_URL).promise;
+            await renderAllPages();
+            loading.style.display = 'none';
+            toolbar.style.display = 'flex';
+            updatePageInfo();
+        } catch (err) {
+            loading.innerHTML = `<div style="color: #ff6b6b;">PDF를 불러올 수 없습니다.<br>${err.message}</div>`;
+            console.error(err);
+        }
+    </script>
 </body>
 </html>
